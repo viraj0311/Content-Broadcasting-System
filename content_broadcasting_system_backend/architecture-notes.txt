@@ -1,0 +1,91 @@
+Authentication & RBAC flow
+- Two role flows are used: principal and teacher.
+- JWT token includes id, role, and email.
+- Protected routes use role-specific middlewares:
+  - adminAuth.required for principal-only routes
+  - teacherAuth.required for teacher-only routes
+
+Subject-based system design
+- Each content record stores subject in lowercase for normalized filtering.
+- content_slots keeps a unique slot per subject.
+- content_schedule links content to slot and stores rotation_order + duration_minutes.
+
+Upload handling approach
+- Dual upload strategy is implemented:
+  - Local storage via multer disk engine
+  - S3 storage via multer-s3 + AWS SDK v3 S3 client
+- Local multer storage writes files to UPLOAD_DIR (default uploads/).
+- Allowed mime types: image/jpeg, image/png, image/gif.
+- File size limit is enforced using MAX_FILE_SIZE_MB (default 10MB).
+- Upload routes:
+  - POST /api/teacher/v1/content/upload (local)
+  - POST /api/teacher/v1/content/upload/s3/:type (S3 folder-based key pattern)
+- S3 key pattern follows Dashships style:
+  <type>/<timestamp>-<original_filename>
+- File path persistence is provider-agnostic:
+  - local uses file.path
+  - s3 uses file.location
+
+Approval workflow design
+- Teacher upload creates content in pending status.
+- Principal can list pending items and approve/reject per content ID.
+- Reject flow requires rejection_reason.
+- Only approved content can appear in public live API.
+
+Scheduling and rotation logic
+- Public live API fetches only approved content within active teacher window:
+  start_time <= now <= end_time.
+- Content is grouped by subject.
+- For each subject group, rotation_order defines sequence.
+- The current item is selected by elapsed minutes modulo total cycle duration.
+- If no active approved content exists, response returns "No content available".
+
+Database design decisions
+- users: auth identity + role.
+- content: upload metadata, approval state, and schedule window.
+- content_slots: one row per subject.
+- content_schedule: subject slot binding + rotation details.
+
+Folder structure
+- Dashships-style layering is followed:
+  routes -> controllers -> services -> repositories -> models.
+- Validation schemas are inside middlewares/joiValidation.
+- Shared response and utility helpers are in utils/.
+
+Middleware usage
+- helmet, cors, compression, morgan, express-rate-limit are added in app.js.
+- Joi validation middleware sanitizes body/query/params.
+- Central error handler normalizes 404 and runtime responses.
+- Upload middleware exports:
+  - uploadLocal
+  - uploadS3
+  - upload (alias to local for backward compatibility)
+
+Scalability approach
+- Rotation logic is deterministic and stateless for horizontal scaling.
+- Repository layer isolates query logic for easy optimization/caching.
+- Easy future extensions:
+  - Redis cache for /api/public/v1/content/live/:teacherId
+  - Queue processing for heavy upload/validation jobs
+  - Provider toggle by environment (UPLOAD_PROVIDER) for deployment-specific storage
+
+Swagger flow pointers
+- Swagger UI is available at: /api-docs
+- Base server URL is configured via SWAGGER_SERVER_URL (fallback: http://localhost:<PORT>).
+- Recommended API test flow in Swagger:
+  1) Register principal: POST /api/admin/v1/auth/register
+  2) Login principal: POST /api/admin/v1/auth/login (copy JWT token)
+  3) Register teacher: POST /api/teacher/v1/auth/register
+  4) Login teacher: POST /api/teacher/v1/auth/login (copy JWT token)
+  5) Authorize as teacher in Swagger (Bearer token)
+  6) Upload content:
+     - local: POST /api/teacher/v1/content/upload
+     - s3: POST /api/teacher/v1/content/upload/s3/{type}
+  7) Authorize as principal in Swagger (Bearer token)
+  8) Review pending: GET /api/admin/v1/content/pending
+  9) Approve/reject:
+     - POST /api/admin/v1/content/{id}/approve
+     - POST /api/admin/v1/content/{id}/reject
+  10) Verify public response:
+     - GET /api/public/v1/content/live/{teacherId}
+     - Optional subject filter: ?subject=maths
